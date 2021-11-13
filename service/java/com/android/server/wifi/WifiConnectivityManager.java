@@ -38,6 +38,7 @@ import android.net.wifi.WifiManager;
 import android.net.wifi.WifiManager.DeviceMobilityState;
 import android.net.wifi.WifiNetworkSuggestion;
 import android.net.wifi.WifiScanner;
+import android.net.wifi.p2p.WifiP2pManager;
 import android.net.wifi.WifiScanner.PnoSettings;
 import android.net.wifi.WifiScanner.ScanSettings;
 import android.net.wifi.hotspot2.PasspointConfiguration;
@@ -172,6 +173,8 @@ public class WifiConnectivityManager {
     private boolean mAutoJoinEnabled = false; // disabled by default, enabled by external triggers
     private boolean mRunning = false;
     private boolean mScreenOn = false;
+    private int mMiracastMode = WifiP2pManager.MIRACAST_DISABLED;
+    private boolean mP2pGroupStarted = false;
     private int mWifiState = WIFI_STATE_UNKNOWN;
     private int mInitialScanState = INITIAL_SCAN_STATE_COMPLETE;
     private boolean mAutoJoinEnabledExternal = true; // enabled by default
@@ -191,6 +194,8 @@ public class WifiConnectivityManager {
     private boolean mPeriodicScanTimerSet = false;
     private boolean mDelayedPartialScanTimerSet = false;
     private boolean mWatchdogScanTimerSet = false;
+    private boolean mAllowConnectionOnPartialScanResults = false;
+    private boolean mWasLastConnectionAttemptedWithPartialResults = false;
 
     // Used for Initial Scan metrics
     private boolean mFailedInitialPartialScan = false;
@@ -343,7 +348,7 @@ public class WifiConnectivityManager {
      */
     private void handleScanResults(@NonNull List<ScanDetail> scanDetails,
             @NonNull String listenerName,
-            boolean isFullScan,
+            boolean isFullScan, boolean isPartialScanResults,
             @NonNull HandleScanResultsListener handleScanResultsListener) {
         List<WifiNetworkSelector.ClientModeManagerState> cmmStates = new ArrayList<>();
         Set<String> connectedSsids = new HashSet<>();
@@ -394,6 +399,29 @@ public class WifiConnectivityManager {
         // Clear expired recent failure statuses
         mConfigManager.cleanupExpiredRecentFailureReasons();
 
+        if (isPartialScanResults) {
+            if (!mContext.getResources().getBoolean(
+                    R.bool.config_wifi_framework_enable_quick_connect)) {
+                return;
+            }
+            if (mAllowConnectionOnPartialScanResults ||
+                ((mContext.getResources().getBoolean(R.bool.config_wifiEnablePartialInitialScan))
+                  && (mInitialScanState != INITIAL_SCAN_STATE_COMPLETE))) {
+                return;
+            }
+        }
+
+        for (WifiNetworkSelector.ClientModeManagerState cmmState : cmmStates) {
+            if (cmmState.disconnected) {
+                mWasLastConnectionAttemptedWithPartialResults = false;
+            }
+            // Do not select network with partial network if we are already connected
+            if (isPartialScanResults && (cmmState.connected ||
+                mWasLastConnectionAttemptedWithPartialResults)) {
+                return;
+            }
+        }
+
         localLog(listenerName + " onResults: start network selection");
 
         List<WifiCandidates.Candidate> candidates = mNetworkSelector.getCandidatesFromScan(
@@ -440,7 +468,7 @@ public class WifiConnectivityManager {
             // intentional fallthrough: No oem paid/private suggestions, fallback to legacy flow.
         }
         handleCandidatesFromScanResultsForPrimaryCmmUsingMbbIfAvailable(
-                listenerName, candidates, handleScanResultsListener);
+                listenerName, candidates, handleScanResultsListener, isPartialScanResults);
     }
 
     /**
@@ -457,38 +485,35 @@ public class WifiConnectivityManager {
                 mNetworkSelector.selectNetwork(secondaryCmmCandidates);
         // No oem paid/private selected, fallback to legacy flow (should never happen!).
         if (secondaryCmmCandidate == null
-                || secondaryCmmCandidate.getNetworkSelectionStatus().getCandidate() == null) {
+                || secondaryCmmCandidate.getNetworkSelectionStatus().getCandidate() == null
+                || (!secondaryCmmCandidate.oemPaid && !secondaryCmmCandidate.oemPrivate)) {
             localLog(listenerName + ": No secondary candidate");
             handleCandidatesFromScanResultsForPrimaryCmmUsingMbbIfAvailable(
                     listenerName,
                     Stream.concat(primaryCmmCandidates.stream(), secondaryCmmCandidates.stream())
                             .collect(Collectors.toList()),
-                    handleScanResultsListener);
+                    handleScanResultsListener, false);
             return;
         }
         String secondaryCmmCandidateBssid =
                 secondaryCmmCandidate.getNetworkSelectionStatus().getCandidate().BSSID;
-        WorkSource secondaryRequestorWs = null;
+
+        // At this point secondaryCmmCandidate must be either oemPaid, oemPrivate, or both.
         // OEM_PAID takes precedence over OEM_PRIVATE, so attribute to OEM_PAID requesting app.
-        if (secondaryCmmCandidate.oemPaid
-                && mActiveModeWarden.canRequestMoreClientModeManagersInRole(
-                mOemPaidConnectionRequestorWs, ROLE_CLIENT_SECONDARY_LONG_LIVED)) {
-            secondaryRequestorWs = mOemPaidConnectionRequestorWs;
-        } else if (secondaryCmmCandidate.oemPrivate
-                && mActiveModeWarden.canRequestMoreClientModeManagersInRole(
-                mOemPrivateConnectionRequestorWs, ROLE_CLIENT_SECONDARY_LONG_LIVED)) {
-            secondaryRequestorWs = mOemPrivateConnectionRequestorWs;
-        }
-        // Secondary STA not available, fallback to legacy flow.
+        WorkSource secondaryRequestorWs = secondaryCmmCandidate.oemPaid
+                ? mOemPaidConnectionRequestorWs : mOemPrivateConnectionRequestorWs;
+
         if (secondaryRequestorWs == null) {
-            localLog(listenerName + ": No secondary STA available");
+            localLog(listenerName + ": Requestor worksource is null in long live STA use-case,"
+                    + "  falling back to single client mode manager flow.");
             handleCandidatesFromScanResultsForPrimaryCmmUsingMbbIfAvailable(
                     listenerName,
                     Stream.concat(primaryCmmCandidates.stream(), secondaryCmmCandidates.stream())
                             .collect(Collectors.toList()),
-                    handleScanResultsListener);
+                    handleScanResultsListener, false);
             return;
         }
+
         WifiConfiguration primaryCmmCandidate =
                 mNetworkSelector.selectNetwork(primaryCmmCandidates);
         // Request for a new client mode manager to spin up concurrent connection
@@ -510,7 +535,7 @@ public class WifiConnectivityManager {
                                 Stream.concat(primaryCmmCandidates.stream(),
                                         secondaryCmmCandidates.stream())
                                         .collect(Collectors.toList()),
-                                handleScanResultsListener);
+                                handleScanResultsListener, false);
                         return;
                     }
                     // Don't use make before break for these connection requests.
@@ -542,11 +567,13 @@ public class WifiConnectivityManager {
      */
     private void handleCandidatesFromScanResultsForPrimaryCmmUsingMbbIfAvailable(
             @NonNull String listenerName, @NonNull List<WifiCandidates.Candidate> candidates,
-            @NonNull HandleScanResultsListener handleScanResultsListener) {
+            @NonNull HandleScanResultsListener handleScanResultsListener,
+                     boolean isPartialScanResults) {
         WifiConfiguration candidate = mNetworkSelector.selectNetwork(candidates);
         if (candidate != null) {
             localLog(listenerName + ":  WNS candidate-" + candidate.SSID);
             connectToNetworkForPrimaryCmmUsingMbbIfAvailable(candidate);
+            mWasLastConnectionAttemptedWithPartialResults = isPartialScanResults;
             handleScanResultsWithCandidate(handleScanResultsListener);
         } else {
             localLog(listenerName + ":  No candidate");
@@ -654,6 +681,7 @@ public class WifiConnectivityManager {
     private class AllSingleScanListener implements WifiScanner.ScanListener {
         private List<ScanDetail> mScanDetails = new ArrayList<ScanDetail>();
         private int mNumScanResultsIgnoredDueToSingleRadioChain = 0;
+        private boolean mPartialScanResults = false;
 
         public void clearScanDetails() {
             mScanDetails.clear();
@@ -712,7 +740,7 @@ public class WifiConnectivityManager {
                         + mNumScanResultsIgnoredDueToSingleRadioChain);
             }
             handleScanResults(scanDetailList,
-                    ALL_SINGLE_SCAN_LISTENER, isFullBandScanResults,
+                    ALL_SINGLE_SCAN_LISTENER, isFullBandScanResults, mPartialScanResults,
                     wasCandidateSelected -> {
                         // Update metrics to see if a single scan detected a valid network
                         // while PNO scan didn't.
@@ -730,6 +758,11 @@ public class WifiConnectivityManager {
                         if (mInitialScanState == INITIAL_SCAN_STATE_AWAITING_RESPONSE) {
                             // Done with initial scan
                             setInitialScanState(INITIAL_SCAN_STATE_COMPLETE);
+                            if (!wasCandidateSelected && mPartialScanResults) {
+                                Log.i(TAG, "Connection not attempted with the reduced initial"
+                                      + "scans, due to partial scan timer");
+                                return;
+                            }
 
                             if (wasCandidateSelected) {
                                 Log.i(TAG, "Connection attempted with the reduced initial scans");
@@ -751,6 +784,15 @@ public class WifiConnectivityManager {
                             mInitialPartialScanChannelCount = 0;
                         }
                     });
+        }
+
+        @Override
+        public void onPartialScanResults(WifiScanner.ScanData[] scanDatas) {
+            if (mVerboseLoggingEnabled)
+                Log.d(TAG, "onPartialScanResults called");
+            mPartialScanResults = true;
+            onResults(scanDatas);
+            mPartialScanResults = false;
         }
 
         @Override
@@ -909,7 +951,7 @@ public class WifiConnectivityManager {
             clearScanDetails();
             mScanRestartCount = 0;
 
-            handleScanResults(scanDetailList, PNO_SCAN_LISTENER, false,
+            handleScanResults(scanDetailList, PNO_SCAN_LISTENER, false, false,
                     wasCandidateSelected -> {
                         if (!wasCandidateSelected) {
                             // The scan results were rejected by WifiNetworkSelector due to low
@@ -1786,6 +1828,17 @@ public class WifiConnectivityManager {
 
     // Start a single scan
     private void startForcedSingleScan(boolean isFullBandScan, WorkSource workSource) {
+        // Any scans will impact wifi performance including WFD performance,
+        // So at least ignore scans triggered internally by ConnectivityManager
+        // when WFD session is active. We still allow connectivity scans initiated
+        // by other work source.
+        if (WIFI_WORK_SOURCE.equals(workSource) && mP2pGroupStarted &&
+            (mMiracastMode == WifiP2pManager.MIRACAST_SOURCE ||
+            mMiracastMode == WifiP2pManager.MIRACAST_SINK)) {
+            Log.d(TAG, "ignore connectivity scan, MiracastMode: " + mMiracastMode);
+            return;
+        }
+
         mPnoScanListener.resetLowRssiNetworkRetryDelay();
 
         ScanSettings settings = new ScanSettings();
@@ -2128,6 +2181,23 @@ public class WifiConnectivityManager {
         mOpenNetworkNotifier.handleScreenStateChanged(screenOn);
 
         startConnectivityScan(SCAN_ON_SCHEDULE);
+    }
+
+    /**
+     * Save current miracast mode, it will be used to ignore
+     * connectivity scan during the time when miracast is enabled.
+     */
+    public void saveMiracastMode(int mode) {
+        Log.d(TAG, "saveMiracastMode: mode=" + mode);
+        mMiracastMode = mode;
+    }
+
+    /**
+     * Save current p2p group started or not.
+     */
+    public void saveP2pGroupStarted(boolean started) {
+        Log.d(TAG, "saveP2pGroupStarted: started=" + started);
+        mP2pGroupStarted = started;
     }
 
     /**
@@ -2521,11 +2591,15 @@ public class WifiConnectivityManager {
             mConfigManager.stopRestrictingAutoJoinToSubscriptionId();
             mConfigManager.clearUserTemporarilyDisabledList();
             mConfigManager.removeAllEphemeralOrPasspointConfiguredNetworks();
+            mWasLastConnectionAttemptedWithPartialResults = false;
             // Flush ANQP cache if configured to do so
             if (mWifiGlobals.flushAnqpCacheOnWifiToggleOffEvent()) {
                 mPasspointManager.clearAnqpRequestsAndFlushCache();
             }
+            saveMiracastMode(WifiP2pManager.MIRACAST_DISABLED);
+            saveP2pGroupStarted(false);
         }
+
         mWifiEnabled = enable;
         updateRunningState();
     }
@@ -2548,6 +2622,13 @@ public class WifiConnectivityManager {
             mAutoJoinEnabledExternal = enable;
             checkAllStatesAndEnableAutoJoin();
         }
+    }
+
+    /**
+     * Allow quick connect with partial scan results
+     */
+    public void allowConnectOnPartialScanResults(boolean enable) {
+        mAllowConnectionOnPartialScanResults = enable;
     }
 
     @VisibleForTesting
