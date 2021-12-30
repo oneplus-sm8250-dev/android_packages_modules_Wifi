@@ -1071,6 +1071,16 @@ public class WifiManager {
     public static final String SCAN_RESULTS_AVAILABLE_ACTION = "android.net.wifi.SCAN_RESULTS";
 
     /**
+     * An access point partial scan has completed, and results are available.
+     * Call {@link #getScanResults()} to obtain the results.
+     * The broadcast intent may contain an extra field with the key {@link #EXTRA_RESULTS_UPDATED}
+     * and a {@code boolean} value indicating if the scan was successful.
+     * @hide
+     */
+    public static final String PARTIAL_SCAN_RESULTS_AVAILABLE_ACTION =
+            "com.qualcomm.qti.net.wifi.PARTIAL_SCAN_RESULTS";
+
+    /**
      * Lookup key for a {@code boolean} extra in intent {@link #SCAN_RESULTS_AVAILABLE_ACTION}
      * representing if the scan was successful or not.
      * Scans may fail for multiple reasons, these may include:
@@ -1884,6 +1894,37 @@ public class WifiManager {
         }
         return addOrUpdateNetwork(config);
     }
+
+    /**
+    * Get SoftAp Wi-Fi generation.
+    *
+    * @return Wi-Fi generation if SoftAp enabled or -1.
+    *
+    * @hide no intent to publish
+    */
+    public int getSoftApWifiStandard() {
+        try {
+            return mService.getSoftApWifiStandard();
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Check whether concurrent band session is supported
+     *
+     * @return A boolean value that will be checked in APPs if
+     * concurrent band session is supported.
+     *
+     * @hide no intent to publish
+     */
+     public boolean isConcurrentBandSupported() {
+         try {
+             return mService.isConcurrentBandSupported();
+         } catch (RemoteException e) {
+             throw e.rethrowFromSystemServer();
+         }
+     }
 
     /**
      * Internal method for doing the RPC that creates a new network description
@@ -5508,6 +5549,19 @@ public class WifiManager {
         }
     }
 
+    /**
+     * Enable/disable quick connect on partial scan results.
+     *
+     * @param  enable true to not allow quick connect, false to allow quick connect
+     * @hide
+     */
+    public void allowConnectOnPartialScanResults(boolean enable) {
+        try {
+            mService.allowConnectOnPartialScanResults(enable);
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
 
     /**
      * Sets the user choice for allowing auto-join to a network.
@@ -6480,6 +6534,22 @@ public class WifiManager {
      */
     private void updateVerboseLoggingEnabledFromService() {
         mVerboseLoggingEnabled = isVerboseLoggingEnabled();
+    }
+
+    /**
+     * Get driver Capabilities.
+     *
+     * @param capaType ASCII string, capability type ex: key_mgmt.
+     * @return String of capabilities from driver for type capaParameter.
+     * {@hide}
+     */
+    @NonNull
+    public String getCapabilities(@NonNull String capaType) {
+        try {
+            return mService.getCapabilities(capaType);
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
     }
 
     /**
@@ -8043,6 +8113,21 @@ public class WifiManager {
         }
     }
 
+     /**
+      * Get device VHT 8SS capability info.
+      *
+      * @return true if device supports VHT 8SS or false.
+      *
+      * @hide no intent to publish
+      */
+    public boolean isVht8ssCapableDevice() {
+        try {
+            return mService.isVht8ssCapableDevice();
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
     /**
      * Enable or disable Wi-Fi scoring.  Wi-Fi network status is evaluated by Wi-Fi scoring
      * {@link WifiScoreReport}. This API enables/disables Wi-Fi scoring to take action on network
@@ -8174,4 +8259,49 @@ public class WifiManager {
             throw e.rethrowFromSystemServer();
         }
     }
+
+    /**
+     * Check the WifiSharing mode.
+     *
+     * @return true if Current Sta network connected with extending coverage
+     * option. false if it is not.
+     *
+     * @hide no intent to publish
+     */
+     public boolean isExtendingWifi() {
+         try {
+             return mService.isExtendingWifi();
+         } catch (RemoteException e) {
+             throw e.rethrowFromSystemServer();
+         }
+     }
+
+    /**
+     * Check Wifi coverage extend feature enabled or not.
+     *
+     * @return true if Wifi extend feature is enabled.
+     *
+     * @hide no intent to publish
+     */
+     public boolean isWifiCoverageExtendFeatureEnabled() {
+         try {
+             return mService.isWifiCoverageExtendFeatureEnabled();
+         } catch (RemoteException e) {
+             throw e.rethrowFromSystemServer();
+         }
+     }
+
+    /**
+     * Enable/disable Wifi coverage extend feature.
+     *
+     * @hide no intent to publish
+     */
+     public void enableWifiCoverageExtendFeature(boolean enable) {
+         try {
+             mService.enableWifiCoverageExtendFeature(enable);
+         } catch (RemoteException e) {
+             throw e.rethrowFromSystemServer();
+         }
+     }
+
 }

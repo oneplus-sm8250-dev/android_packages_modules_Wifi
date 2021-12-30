@@ -589,6 +589,9 @@ public class ClientModeImpl extends StateMachine implements ClientMode {
     /* Tracks IpClient start state until (FILS_)NETWORK_CONNECTION_EVENT event */
     private boolean mIpClientWithPreConnection = false;
 
+    /* Track setupClientMode to defer WifiConnectivityManger start */
+    private boolean isClientSetupCompleted = false;
+
     /**
      * Work source to use to blame usage on the WiFi service
      */
@@ -1221,6 +1224,14 @@ public class ClientModeImpl extends StateMachine implements ClientMode {
         }
         mWifiMetrics.incrementWifiLinkLayerUsageStats(mInterfaceName, stats);
         return stats;
+    }
+
+    public String doDriverCmd(String command) {
+        if (mInterfaceName == null) {
+            loge("doDriverCmd called without an interface");
+            return null;
+        }
+        return mWifiNative.doDriverCmd(mInterfaceName, command);
     }
 
     /**
@@ -3211,6 +3222,8 @@ public class ClientModeImpl extends StateMachine implements ClientMode {
             }
         }
         mWifiInfo.setMacAddress(mWifiNative.getMacAddress(mInterfaceName));
+        mWifiConnectivityManager.handleConnectionStateChanged(mClientModeManager,
+                WifiConnectivityManager.WIFI_STATE_DISCONNECTED);
         // TODO: b/79504296 This broadcast has been deprecated and should be removed
         sendSupplicantConnectionChangedBroadcast(true);
 
@@ -3249,6 +3262,7 @@ public class ClientModeImpl extends StateMachine implements ClientMode {
 
         // Retrieve and store the factory MAC address (on first bootup).
         retrieveFactoryMacAddressAndStoreIfNecessary();
+        isClientSetupCompleted = true;
     }
 
     /**
@@ -3269,6 +3283,7 @@ public class ClientModeImpl extends StateMachine implements ClientMode {
         deregisterForWifiMonitorEvents(); // uses mInterfaceName, must call before nulling out
         // TODO: b/79504296 This broadcast has been deprecated and should be removed
         sendSupplicantConnectionChangedBroadcast(false);
+        isClientSetupCompleted = false;
     }
 
     /**
@@ -3809,7 +3824,18 @@ public class ClientModeImpl extends StateMachine implements ClientMode {
                             WifiDiagnostics.CONNECTION_EVENT_TIMEOUT, mClientModeManager);
                     break;
                 }
+                case WifiP2pServiceImpl.SET_MIRACAST_MODE:
+                    if (mVerboseLoggingEnabled) logd("SET_MIRACAST_MODE: " + (int)message.arg1);
+                    mWifiConnectivityManager.saveMiracastMode((int)message.arg1);
+                    break;
                 case WifiP2pServiceImpl.P2P_CONNECTION_CHANGED:
+                    NetworkInfo info = (NetworkInfo) message.obj;
+                    if (info != null) {
+                        NetworkInfo.DetailedState detailedState = info.getDetailedState();
+                        mWifiConnectivityManager.saveP2pGroupStarted(
+                                detailedState == NetworkInfo.DetailedState.CONNECTED);
+                    }
+                    break;
                 case CMD_RESET_SIM_NETWORKS:
                 case WifiMonitor.NETWORK_CONNECTION_EVENT:
                 case WifiMonitor.NETWORK_DISCONNECTION_EVENT:
@@ -4236,11 +4262,9 @@ public class ClientModeImpl extends StateMachine implements ClientMode {
             mCmiMonitor.onConnectionEnd(mClientModeManager);
 
             // Not connected/connecting to any network:
-            // 1. Disable the network in supplicant to prevent it from auto-connecting. We don't
-            // remove the network to avoid losing any cached info in supplicant (reauth, etc) in
-            // case we reconnect back to the same network.
+            // 1. remove the network in supplicant since PMKSA is now saved in framework.
             // 2. Set a random MAC address to ensure that we're not leaking the MAC address.
-            mWifiNative.disableNetwork(mInterfaceName);
+            mWifiNative.removeAllNetworks(mInterfaceName);
             if (mWifiGlobals.isConnectedMacRandomizationEnabled()) {
                 if (!mWifiNative.setStaMacAddress(
                         mInterfaceName, MacAddressUtils.createRandomUnicastAddress())) {
@@ -5775,9 +5799,11 @@ public class ClientModeImpl extends StateMachine implements ClientMode {
             mIsAutoRoaming = false;
             mTargetNetworkId = WifiConfiguration.INVALID_NETWORK_ID;
 
-            mWifiConnectivityManager.handleConnectionStateChanged(
-                    mClientModeManager,
-                    WifiConnectivityManager.WIFI_STATE_DISCONNECTED);
+            if (isClientSetupCompleted) {
+                mWifiConnectivityManager.handleConnectionStateChanged(
+                        mClientModeManager,
+                        WifiConnectivityManager.WIFI_STATE_DISCONNECTED);
+            }
         }
 
         @Override
@@ -6625,8 +6651,20 @@ public class ClientModeImpl extends StateMachine implements ClientMode {
      * SSID allowlist with the linked networks.
      */
     private void updateLinkedNetworks(@NonNull WifiConfiguration config) {
-        if (!mContext.getResources().getBoolean(R.bool.config_wifiEnableLinkedNetworkRoaming)
-                || !config.allowedKeyManagement.get(WifiConfiguration.KeyMgmt.WPA_PSK)) {
+        if (!mContext.getResources().getBoolean(R.bool.config_wifiEnableLinkedNetworkRoaming)) {
+            return;
+        }
+
+        SecurityParams params = mWifiNative.getCurrentSecurityParams(mInterfaceName);
+        if (params == null || !params.isSecurityType(WifiConfiguration.SECURITY_TYPE_PSK)) {
+            return;
+        }
+
+        // check for FT/PSK
+        ScanResult scanResult = mScanRequestProxy.getScanResult(mLastBssid);
+        String caps = (scanResult != null) ? scanResult.capabilities : "";
+        if (caps.contains("FT/PSK")) {
+            Log.i(TAG, "Linked network - return as current connection is FT-PSK");
             return;
         }
 

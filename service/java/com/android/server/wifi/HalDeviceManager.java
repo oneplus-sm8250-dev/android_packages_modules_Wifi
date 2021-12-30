@@ -939,6 +939,7 @@ public class HalDeviceManager {
 
                 if (!mWifi.linkToDeath(mIWifiDeathRecipient, /* don't care */ 0)) {
                     Log.e(TAG, "Error on linkToDeath on IWifi - will retry later");
+                    mWifi = null;
                     return;
                 }
 
@@ -959,6 +960,7 @@ public class HalDeviceManager {
                 stopWifi();
                 mIsReady = true;
             } catch (RemoteException e) {
+                mWifi = null;
                 Log.e(TAG, "Exception while operating on IWifi: " + e);
             }
         }
@@ -2751,5 +2753,67 @@ public class HalDeviceManager {
         pw.println("  mManagerStatusListeners: " + mManagerStatusListeners);
         pw.println("  mInterfaceInfoCache: " + mInterfaceInfoCache);
         pw.println("  mDebugChipsInfo: " + Arrays.toString(getAllChipInfo()));
+    }
+
+
+    public boolean needToDeleteIfacesDueToBridgeMode(int hdmIfaceTypeTobeCreated,
+            WorkSource requestorWs) {
+        synchronized (mLock) {
+            // If requested type to be created is STA, then target type is SAP and vice-versa
+            int ifaceTypeToCreate, ifaceTypeToDelete;
+            ifaceTypeToCreate = mHalIfaceMap.get(hdmIfaceTypeTobeCreated);
+            if (ifaceTypeToCreate == IfaceType.AP)
+                ifaceTypeToDelete = IfaceType.STA;
+            else if (ifaceTypeToCreate == IfaceType.STA)
+                ifaceTypeToDelete = IfaceType.AP;
+            else
+                return false;
+
+            // 1. When requested type isn't active, no need to check further. return false;
+            int ifaceCount = 0;
+            InterfaceCacheEntry ifaceEntry = null;
+            for (InterfaceCacheEntry entry : mInterfaceInfoCache.values()) {
+                if (entry.type == ifaceTypeToDelete) {
+                    ifaceCount++;
+                    // keep the highest priority entry for comparision.
+                    if (ifaceEntry == null) {
+                        ifaceEntry = entry;
+                    } else if (getRequestorWsPriority(ifaceEntry.requestorWsHelper)
+                                > getRequestorWsPriority(entry.requestorWsHelper)) {
+                        ifaceEntry = entry;
+                    }
+                }
+            }
+            if (ifaceCount == 0) {
+                return false;
+            }
+
+            // 2. If STA+AP+AP is supported, return false;
+            if (canSupportIfaceCombo(new SparseArray<Integer>() {{
+                    put(IfaceType.STA, 1);
+                    put(IfaceType.AP, 2);
+                  }})) {
+                return false;
+            }
+            // 3. if AP+AP is not supported, return false;
+            if (!canSupportIfaceCombo(new SparseArray<Integer>() {{
+                    put(IfaceType.AP, 2);
+                  }})) {
+                return false;
+            }
+            // 4. if newIface worksource has higher priority over existing Ws. return false;
+            WorkSourceHelper newRequestorWsHelper = mWifiInjector.makeWsHelper(requestorWs);
+            int newRequestorWsPriority = getRequestorWsPriority(newRequestorWsHelper);
+            int ifaceEntryRequestorWsPriority = getRequestorWsPriority(ifaceEntry.requestorWsHelper);
+
+            Log.d(TAG, "needToDeleteIfacesDueToBridgeMode: newRequestorWsPriority["+ifaceTypeToCreate+"]: " + newRequestorWsPriority
+                        + " ifaceEntryRequestorWsPriority["+ifaceTypeToDelete+"]: " + ifaceEntryRequestorWsPriority);
+            if (!allowedToDelete(ifaceTypeToCreate, newRequestorWsPriority,
+                                 ifaceTypeToDelete, ifaceEntryRequestorWsPriority)) {
+                return false;
+            }
+
+            return true;
+        }
     }
 }
