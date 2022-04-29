@@ -99,6 +99,8 @@ interface IWifiManager
 
     void allowAutojoinGlobal(boolean choice);
 
+    void allowConnectOnPartialScanResults(boolean enable);
+
     void allowAutojoin(int netId, boolean choice);
 
     void allowAutojoinPasspoint(String fqdn, boolean enableAutoJoin);
@@ -245,6 +247,8 @@ interface IWifiManager
 
     void unregisterTrafficStateCallback(in ITrafficStateCallback callback);
 
+    String getCapabilities(String capaType);
+
     void registerNetworkRequestMatchCallback(in INetworkRequestMatchCallback callback);
 
     void unregisterNetworkRequestMatchCallback(in INetworkRequestMatchCallback callback);
@@ -337,4 +341,16 @@ interface IWifiManager
     void flushPasspointAnqpCache(String packageName);
 
     List<WifiAvailableChannel> getUsableChannels(int band, int mode, int filter);
+
+    int getSoftApWifiStandard();
+
+    boolean isVht8ssCapableDevice();
+
+    boolean isExtendingWifi();
+
+    boolean isWifiCoverageExtendFeatureEnabled();
+
+    void enableWifiCoverageExtendFeature(boolean enable);
+
+    boolean isConcurrentBandSupported();
 }

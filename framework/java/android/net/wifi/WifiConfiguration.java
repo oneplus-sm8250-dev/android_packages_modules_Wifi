@@ -134,7 +134,8 @@ public class WifiConfiguration implements Parcelable {
                 WAPI_PSK,
                 WAPI_CERT,
                 FILS_SHA256,
-                FILS_SHA384})
+                FILS_SHA384,
+                DPP})
         public @interface KeyMgmtScheme {}
 
         /** WPA is not used; plaintext or static WEP could be used. */
@@ -225,13 +226,18 @@ public class WifiConfiguration implements Parcelable {
          * @hide
          */
         public static final int FILS_SHA384 = 16;
+        /**
+         * Device Provisioning Protocol
+         * @hide
+         */
+        public static final int DPP = 17;
 
         public static final String varName = "key_mgmt";
 
         public static final String[] strings = { "NONE", "WPA_PSK", "WPA_EAP",
                 "IEEE8021X", "WPA2_PSK", "OSEN", "FT_PSK", "FT_EAP",
                 "SAE", "OWE", "SUITE_B_192", "WPA_PSK_SHA256", "WPA_EAP_SHA256",
-                "WAPI_PSK", "WAPI_CERT", "FILS_SHA256", "FILS_SHA384" };
+                "WAPI_PSK", "WAPI_CERT", "FILS_SHA256", "FILS_SHA384", "DPP",  };
     }
 
     /**
@@ -1014,6 +1020,12 @@ public class WifiConfiguration implements Parcelable {
     public static final int AP_BAND_60GHZ = 2;
 
     /**
+     * 2GHz + 5GHz Dual band.
+     * @hide
+     */
+    public static final int AP_BAND_DUAL = 3;
+
+    /**
      * Device is allowed to choose the optimal band (2Ghz or 5Ghz) based on device capability,
      * operating country code and current radio conditions.
      * @hide
@@ -1134,6 +1146,12 @@ public class WifiConfiguration implements Parcelable {
      */
     @SystemApi
     public boolean requirePmf;
+
+    /**
+     * @hide
+     * This configuration is used in AP to extend the coverage.
+     */
+    public boolean shareThisAp;
 
     /**
      * Update identifier, for Passpoint network.
@@ -2853,6 +2871,7 @@ public class WifiConfiguration implements Parcelable {
         priority = 0;
         mDeletionPriority = 0;
         hiddenSSID = false;
+        shareThisAp = false;
         allowedKeyManagement = new BitSet();
         allowedProtocols = new BitSet();
         allowedAuthAlgorithms = new BitSet();
@@ -3171,6 +3190,7 @@ public class WifiConfiguration implements Parcelable {
         sbuf.append("recentFailure: ").append("Association Rejection code: ")
                 .append(recentFailure.getAssociationStatus()).append(", last update time: ")
                 .append(recentFailure.getLastUpdateTimeSinceBootMillis()).append("\n");
+        sbuf.append("ShareThisAp: ").append(this.shareThisAp).append("\n");
         return sbuf.toString();
     }
 
@@ -3551,6 +3571,7 @@ public class WifiConfiguration implements Parcelable {
             SSID = source.SSID;
             BSSID = source.BSSID;
             FQDN = source.FQDN;
+            shareThisAp = source.shareThisAp;
             roamingConsortiumIds = source.roamingConsortiumIds.clone();
             providerFriendlyName = source.providerFriendlyName;
             isHomeProviderNetwork = source.isHomeProviderNetwork;
@@ -3643,6 +3664,7 @@ public class WifiConfiguration implements Parcelable {
         mNetworkSelectionStatus.writeToParcel(dest);
         dest.writeString(SSID);
         dest.writeString(BSSID);
+        dest.writeInt(shareThisAp ? 1 : 0);
         dest.writeInt(apBand);
         dest.writeInt(apChannel);
         dest.writeString(FQDN);
@@ -3728,6 +3750,7 @@ public class WifiConfiguration implements Parcelable {
                 config.mNetworkSelectionStatus.readFromParcel(in);
                 config.SSID = in.readString();
                 config.BSSID = in.readString();
+                config.shareThisAp = in.readInt() != 0;
                 config.apBand = in.readInt();
                 config.apChannel = in.readInt();
                 config.FQDN = in.readString();
