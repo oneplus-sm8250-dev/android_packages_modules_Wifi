@@ -388,9 +388,13 @@ public class SoftApManager implements ActiveModeManager {
         mStateMachine.sendMessage(SoftApStateMachine.CMD_STOP);
     }
 
-    private boolean isBridgedMode() {
+    public boolean isBridgedMode() {
         return (SdkLevel.isAtLeastS() && mCurrentSoftApConfiguration != null
-                && mCurrentSoftApConfiguration.getBands().length > 1);
+                && (mCurrentSoftApConfiguration.getBands().length > 1
+                    || (mCurrentSoftApConfiguration.getSecurityType()
+                        == SoftApConfiguration.SECURITY_TYPE_OWE
+                       && (mCurrentSoftApConfiguration.getBand()
+                           & SoftApConfiguration.BAND_6GHZ) == 0)));
     }
 
     private long getShutdownTimeoutMillis() {
@@ -591,9 +595,10 @@ public class SoftApManager implements ActiveModeManager {
     private int setCountryCode() {
         int band = mCurrentSoftApConfiguration.getBand();
         if (TextUtils.isEmpty(mCountryCode)) {
-            if (band == SoftApConfiguration.BAND_5GHZ) {
+            if (band == SoftApConfiguration.BAND_5GHZ || band == SoftApConfiguration.BAND_6GHZ) {
                 // Country code is mandatory for 5GHz band.
-                Log.e(getTag(), "Invalid country code, required for setting up soft ap in 5GHz");
+                Log.e(getTag(), "Invalid country code, "
+                        + "required for setting up soft ap in 5GHz/6GHz");
                 return ERROR_GENERIC;
             }
             // Absence of country code is not fatal for 2Ghz & Any band options.
@@ -601,11 +606,11 @@ public class SoftApManager implements ActiveModeManager {
         }
         if (!mWifiNative.setApCountryCode(
                 mApInterfaceName, mCountryCode.toUpperCase(Locale.ROOT))) {
-            if (band == SoftApConfiguration.BAND_5GHZ) {
+            if (band == SoftApConfiguration.BAND_5GHZ || band == SoftApConfiguration.BAND_6GHZ) {
                 // Return an error if failed to set country code when AP is configured for
                 // 5GHz band.
                 Log.e(getTag(), "Failed to set country code, "
-                        + "required for setting up soft ap in 5GHz");
+                        + "required for setting up soft ap in 5GHz/6GHz");
                 return ERROR_GENERIC;
             }
             // Failure to set country code is not fatal for other band options.
@@ -894,7 +899,8 @@ public class SoftApManager implements ActiveModeManager {
                         }
                         mApInterfaceName = mWifiNative.setupInterfaceForSoftApMode(
                                 mWifiNativeInterfaceCallback, mRequestorWs,
-                                mCurrentSoftApConfiguration.getBand(), isBridgedMode());
+                                mCurrentSoftApConfiguration.getBand(), isBridgedMode(),
+                                mCurrentSoftApConfiguration.getSecurityType());
                         if (TextUtils.isEmpty(mApInterfaceName)) {
                             Log.e(getTag(), "setup failure when creating ap interface.");
                             updateApState(WifiManager.WIFI_AP_STATE_FAILED,

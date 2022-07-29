@@ -65,6 +65,10 @@ public class WifiP2pWfdInfoTest {
         info.setDeviceType(WifiP2pWfdInfo.DEVICE_TYPE_WFD_SOURCE);
         assertEquals(WifiP2pWfdInfo.DEVICE_TYPE_WFD_SOURCE, info.getDeviceType());
 
+        assertFalse(info.isR2Supported());
+        info.setR2DeviceType(WifiP2pWfdInfo.DEVICE_TYPE_WFD_SOURCE);
+        assertTrue(info.isR2Supported());
+
         info.setSessionAvailable(true);
         assertTrue(info.isSessionAvailable());
 

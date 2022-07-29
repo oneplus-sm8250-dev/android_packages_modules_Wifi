@@ -18,8 +18,10 @@ package com.android.server.wifi;
 
 import static android.content.Intent.ACTION_SCREEN_OFF;
 import static android.content.Intent.ACTION_SCREEN_ON;
+import static android.net.NetworkInfo.DetailedState.AUTHENTICATING;
 import static android.net.NetworkInfo.DetailedState.CONNECTED;
 import static android.net.NetworkInfo.DetailedState.CONNECTING;
+import static android.net.NetworkInfo.DetailedState.DISCONNECTED;
 import static android.net.NetworkInfo.DetailedState.OBTAINING_IPADDR;
 import static android.net.wifi.WifiConfiguration.METERED_OVERRIDE_METERED;
 import static android.net.wifi.WifiConfiguration.METERED_OVERRIDE_NONE;
@@ -100,6 +102,7 @@ import android.net.vcn.VcnManager;
 import android.net.vcn.VcnNetworkPolicyResult;
 import android.net.wifi.IActionListener;
 import android.net.wifi.ScanResult;
+import android.net.wifi.SecurityParams;
 import android.net.wifi.SupplicantState;
 import android.net.wifi.WifiConfiguration;
 import android.net.wifi.WifiConfiguration.KeyMgmt;
@@ -113,6 +116,7 @@ import android.net.wifi.hotspot2.IProvisioningCallback;
 import android.net.wifi.hotspot2.OsuProvider;
 import android.net.wifi.nl80211.WifiNl80211Manager;
 import android.net.wifi.p2p.WifiP2pManager;
+import android.net.wifi.util.ScanResultUtil;
 import android.os.BatteryStatsManager;
 import android.os.Binder;
 import android.os.Bundle;
@@ -153,7 +157,6 @@ import com.android.server.wifi.proto.nano.WifiMetricsProto.WifiUsabilityStats;
 import com.android.server.wifi.util.ActionListenerWrapper;
 import com.android.server.wifi.util.NativeUtil;
 import com.android.server.wifi.util.RssiUtilTest;
-import com.android.server.wifi.util.ScanResultUtil;
 import com.android.server.wifi.util.WifiPermissionsUtil;
 import com.android.wifi.resources.R;
 
@@ -181,6 +184,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
@@ -858,6 +862,47 @@ public class ClientModeImplTest extends WifiBaseTest {
                         .filter(WifiConfigurationUtil::isSecurityParamsValid)
                         .findFirst().orElse(null),
                 config.getNetworkSelectionStatus().getCandidateSecurityParams());
+    }
+
+    /**
+     * Tests the network connection initiation sequence with the default network request pending
+     * from WifiNetworkFactory.
+     * This simulates the connect sequence using the public
+     * {@link WifiManager#enableNetwork(int, boolean)} and ensures that we invoke
+     * {@link WifiNative#connectToNetwork(WifiConfiguration)}.
+     */
+    @Test
+    public void triggerConnectWithUpgradeType() throws Exception {
+        String ssid = "TestOpenOweSsid";
+        WifiConfiguration config = spy(WifiConfigurationTestUtil.createOpenOweNetwork(
+                ScanResultUtil.createQuotedSsid(ssid)));
+        doAnswer(new AnswerWithArguments() {
+            public void answer(
+                    WifiConfiguration network, ScanDetail scanDetail) {
+                if (!config.SSID.equals(network.SSID)) return;
+                config.getNetworkSelectionStatus().setCandidateSecurityParams(
+                        SecurityParams.createSecurityParamsBySecurityType(
+                                WifiConfiguration.SECURITY_TYPE_OWE));
+            }
+        }).when(mWifiNetworkSelector).updateNetworkCandidateSecurityParams(any(), any());
+        String caps = "[RSN-OWE_TRANSITION]";
+        ScanResult scanResult = new ScanResult(WifiSsid.createFromAsciiEncoded(ssid),
+                ssid, TEST_BSSID_STR, 1245, 0, caps, -78, 2412, 1025, 22, 33, 20, 0, 0, true);
+        ScanResult.InformationElement ie = createIE(ScanResult.InformationElement.EID_SSID,
+                ssid.getBytes(StandardCharsets.UTF_8));
+        scanResult.informationElements = new ScanResult.InformationElement[]{ie};
+        when(mScanRequestProxy.getScanResults()).thenReturn(Arrays.asList(scanResult));
+
+        config.networkId = FRAMEWORK_NETWORK_ID;
+        config.setRandomizedMacAddress(TEST_LOCAL_MAC_ADDRESS);
+        config.macRandomizationSetting = WifiConfiguration.RANDOMIZATION_AUTO;
+        config.getNetworkSelectionStatus().setHasEverConnected(mTestNetworkParams.hasEverConnected);
+        assertEquals(null, config.getNetworkSelectionStatus().getCandidateSecurityParams());
+
+        setupAndStartConnectSequence(config);
+        validateSuccessfulConnectSequence(config);
+        assertTrue(config.getNetworkSelectionStatus().getCandidateSecurityParams()
+                .isSecurityType(WifiConfiguration.SECURITY_TYPE_OWE));
     }
 
     /**
@@ -2049,6 +2094,7 @@ public class ClientModeImplTest extends WifiBaseTest {
      */
     @Test
     public void testWrongPasswordWithNeverConnected() throws Exception {
+        InOrder inOrder = inOrder(mContext);
         initializeAndAddNetworkAndVerifySuccess();
 
         startConnectSuccess();
@@ -2058,6 +2104,14 @@ public class ClientModeImplTest extends WifiBaseTest {
         config.getNetworkSelectionStatus().setHasEverConnected(false);
         config.carrierId = CARRIER_ID_1;
         when(mWifiConfigManager.getConfiguredNetwork(anyInt())).thenReturn(config);
+
+        // Need to add supplicant state changed event to simulate broadcasts correctly
+        mCmi.sendMessage(WifiMonitor.SUPPLICANT_STATE_CHANGE_EVENT, 0, 0,
+                new StateChangeResult(0, TEST_WIFI_SSID, TEST_BSSID_STR,
+                        SupplicantState.ASSOCIATED));
+        mCmi.sendMessage(WifiMonitor.SUPPLICANT_STATE_CHANGE_EVENT, 0, 0,
+                new StateChangeResult(0, TEST_WIFI_SSID, TEST_BSSID_STR,
+                        SupplicantState.FOUR_WAY_HANDSHAKE));
 
         mCmi.sendMessage(WifiMonitor.AUTHENTICATION_FAILURE_EVENT,
                 WifiManager.ERROR_AUTH_FAILURE_WRONG_PSWD);
@@ -2070,6 +2124,14 @@ public class ClientModeImplTest extends WifiBaseTest {
         verify(mWifiConfigManager).updateNetworkSelectionStatus(anyInt(),
                 eq(WifiConfiguration.NetworkSelectionStatus.DISABLED_BY_WRONG_PASSWORD));
         verify(mWifiMetrics).incrementNumOfCarrierWifiConnectionAuthFailure();
+        // Verify broadcasts corresponding to supplicant ASSOCIATED, FOUR_WAY_HANDSHAKE, then
+        // finally wrong password causing disconnect.
+        inOrder.verify(mContext).sendStickyBroadcastAsUser(
+                argThat(new NetworkStateChangedIntentMatcher(CONNECTING)), any());
+        inOrder.verify(mContext).sendStickyBroadcastAsUser(
+                argThat(new NetworkStateChangedIntentMatcher(AUTHENTICATING)), any());
+        inOrder.verify(mContext).sendStickyBroadcastAsUser(
+                argThat(new NetworkStateChangedIntentMatcher(DISCONNECTED)), any());
         assertEquals("DisconnectedState", getCurrentState().getName());
     }
 
@@ -4656,6 +4718,45 @@ public class ClientModeImplTest extends WifiBaseTest {
         assertNotEquals("The currently programmed MAC address should be different from the factory "
                 + "MAC address after ClientModeImpl starts",
                 mCmi.getFactoryMacAddress(), currentMac.toString());
+
+        // Verify interface up will not re-randomize the MAC address again.
+        mCmi.onUpChanged(true);
+        verify(mWifiNative).setStaMacAddress(anyString(), macAddressCaptor.capture());
+    }
+
+    /**
+     * Verify if re-randomizing had failed, then we will retry the next time the interface comes up.
+     */
+    @Test
+    public void testRandomizeMacAddressFailedRetryOnInterfaceUp() throws Exception {
+        // mock setting the MAC address to fail
+        when(mWifiNative.setStaMacAddress(eq(WIFI_IFACE_NAME), anyObject())).thenReturn(false);
+        initializeCmi();
+
+        ArgumentCaptor<MacAddress> macAddressCaptor = ArgumentCaptor.forClass(MacAddress.class);
+        verify(mWifiNative, times(2)).setStaMacAddress(anyString(), macAddressCaptor.capture());
+        MacAddress currentMac = macAddressCaptor.getValue();
+
+        // mock setting the MAC address to succeed
+        when(mWifiNative.setStaMacAddress(eq(WIFI_IFACE_NAME), anyObject()))
+                .then(new AnswerWithArguments() {
+                    public boolean answer(String iface, MacAddress mac) {
+                        when(mWifiNative.getMacAddress(iface)).thenReturn(mac.toString());
+                        return true;
+                    }
+                });
+
+        // Verify interface up will re-randomize the MAC address since the last attempt failed.
+        mCmi.onUpChanged(true);
+        verify(mWifiNative, times(3)).setStaMacAddress(anyString(), macAddressCaptor.capture());
+        assertNotEquals("The currently programmed MAC address should be different from the factory "
+                        + "MAC address after ClientModeImpl starts",
+                mCmi.getFactoryMacAddress(), currentMac.toString());
+
+        // Verify interface up will not re-randomize the MAC address since the last attempt
+        // succeeded.
+        mCmi.onUpChanged(true);
+        verify(mWifiNative, times(3)).setStaMacAddress(anyString(), macAddressCaptor.capture());
     }
 
     /**
@@ -5066,7 +5167,7 @@ public class ClientModeImplTest extends WifiBaseTest {
         config.setSecurityParams(WifiConfiguration.SECURITY_TYPE_EAP);
         config.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.WPA_EAP);
         config.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.IEEE8021X);
-        config.SSID = ScanResultUtil.createQuotedSSID(sFilsSsid);
+        config.SSID = ScanResultUtil.createQuotedSsid(sFilsSsid);
         config.networkId = 1;
         config.setRandomizedMacAddress(TEST_LOCAL_MAC_ADDRESS);
         config.macRandomizationSetting = WifiConfiguration.RANDOMIZATION_AUTO;
